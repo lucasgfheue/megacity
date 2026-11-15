@@ -1,0 +1,80 @@
+name: Compilar MegaCiudad
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: compilar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Instalar Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Descomprimir el zip
+        id: codigo
+        run: |
+          # Usa el .zip más reciente del repositorio; si no hay, el código ya descomprimido.
+          zip=""; mejor=-1
+          while IFS= read -r f; do
+            t=$(git log -1 --format=%ct -- "$f"); t=${t:-0}
+            if [ "$t" -ge "$mejor" ]; then mejor=$t; zip=$f; fi
+          done < <(git ls-files -- '*.zip' '*.ZIP')
+          if [ -n "$zip" ]; then
+            echo "Usando $zip"
+            base="$RUNNER_TEMP/codigo"; rm -rf "$base"; mkdir -p "$base"
+            unzip -q "$zip" -d "$base"
+          else
+            echo "No hay zip: uso el código del repositorio"
+            base="$GITHUB_WORKSPACE"
+          fi
+          ajustes=$(find "$base" -name settings.gradle -not -path '*/.git/*' -not -path '*/__MACOSX/*' -printf '%d\t%p\n' | sort -n | awk -F'\t' 'NR==1 {print $2}')
+          if [ -z "$ajustes" ]; then
+            echo "::error::No encontré el mod. Sube MegaCiudad-NeoForge-1.21.1.zip al repositorio tal cual."
+            exit 1
+          fi
+          echo "dir=$(dirname "$ajustes")" >> "$GITHUB_OUTPUT"
+
+      - name: Compilar
+        working-directory: ${{ steps.codigo.outputs.dir }}
+        run: |
+          chmod +x gradlew
+          ./gradlew build --no-daemon --stacktrace
+          mkdir -p "$RUNNER_TEMP/salida"
+          find build/libs -maxdepth 1 -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' -exec cp {} "$RUNNER_TEMP/salida/" \;
+          ls -l "$RUNNER_TEMP"/salida/*.jar
+
+      - name: Guardar el .jar en Actions
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/salida/*.jar
+          archive: false
+          if-no-files-found: error
+
+      - name: Publicar el .jar en Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete compilacion --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create compilacion "$RUNNER_TEMP"/salida/*.jar --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "MegaCiudad (última compilación)" \
+            --notes "Descarga el .jar de Assets y ponlo en la carpeta mods junto con LittleTiles y CreativeCore."
+          echo "Descarga el mod: https://github.com/$GITHUB_REPOSITORY/releases/tag/compilacion" >> "$GITHUB_STEP_SUMMARY"
